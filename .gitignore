@@ -1,0 +1,310 @@
+# ShutterCut Video Editing App - Git Ignore File
+
+# ============================================
+# PYTHON / BACKEND
+# ============================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# ============================================
+# NODE / REACT NATIVE / FRONTEND
+# ============================================
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# Note: package-lock.json is intentionally tracked for reproducible builds
+
+# Expo
+.expo/
+.expo-shared/
+dist/
+web-build/
+
+# Metro
+.metro-health-check*
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ============================================
+# UPLOADS & RESULTS (Large files)
+# ============================================
+
+# Keep directory structure but ignore contents
+uploads/*
+!uploads/.gitkeep
+
+results/*
+!results/.gitkeep
+
+# ============================================
+# FFMPEG BINARIES
+# ============================================
+
+# FFmpeg executables (these are auto-downloaded)
+backend/bin/*.exe
+backend/bin/ffmpeg
+backend/bin/ffprobe
+backend/bin/*.dll
+backend/bin/*.dylib
+backend/bin/*.so
+backend/bin/*.zip
+
+# Keep the bin directory
+!backend/bin/.gitkeep
+
+# ============================================
+# MACOS
+# ============================================
+
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# ============================================
+# WINDOWS
+# ============================================
+
+# Windows thumbnail cache files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# Dump file
+*.stackdump
+
+# Folder config file
+[Dd]esktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Windows Installer files
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# ============================================
+# LINUX
+# ============================================
+
+*~
+
+# temporary files which can be created if a process still has a handle open of a deleted file
+.fuse_hidden*
+
+# KDE directory preferences
+.directory
+
+# Linux trash folder which might appear on any partition or disk
+.Trash-*
+
+# .nfs files are created when an open file is removed but is still being accessed
+.nfs*
+
+# ============================================
+# DOCKER
+# ============================================
+
+# Ignore Docker volumes and build cache (but keep Dockerfiles)
+.docker/
+docker-compose.override.yml
+
+# ============================================
+# LOGS
+# ============================================
+
+*.log
+logs/
+*.log.*
+
+# ============================================
+# TEMPORARY FILES
+# ============================================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~.nib
+local.properties
+
+# Rovodev temporary files (created during testing)
+tmp_rovodev_*
+
+# ============================================
+# DATABASE FILES (if added later)
+# ============================================
+
+*.sqlite
+*.sqlite3
+*.db
+
+# ============================================
+# MEDIA FILES (Sample/Test files)
+# ============================================
+
+# Uncomment if you don't want to commit large test videos
+# *.mp4
+# *.mov
+# *.avi
+# *.mkv
+# *.png
+# *.jpg
+# *.jpeg
+
+# ============================================
+# CERTIFICATES & KEYS
+# ============================================
+
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# ============================================
+# MISC
+# ============================================
+
+# Ignore all dotenv files
+.env*
+!.env.example
+
+# Ignore all secret/config files
+secrets/
+config.local.*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS generated files
+.DS_Store
+.DS_Store?
+
+# ============================================
+# PROJECT SPECIFIC
+# ============================================
+
+# Don't ignore important config files
+!.gitignore
+!.dockerignore
+!.env.example
+
+# Keep README and documentation
+!README.md
+!*.md
+
+# Keep package files
+!package.json
+!requirements.txt
+
+# Keep all source code
+!backend/*.py
+!frontend/src/**/*.js
+!frontend/*.js
+!frontend/*.json

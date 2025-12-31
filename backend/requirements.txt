@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-multipart
+aiofiles
+requests
+# ffmpeg-python # We might use subprocess for better control over the binary path
