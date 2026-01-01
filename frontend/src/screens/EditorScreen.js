@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Dimensions, ActivityIndicator, Alert, TextInput, ScrollView, Platform, KeyboardAvoidingView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Dimensions, ActivityIndicator, Alert, TextInput, ScrollView, Platform, KeyboardAvoidingView, Linking } from 'react-native';
 import { Video, ResizeMode } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -7,12 +7,31 @@ import { theme } from '../constants/theme';
 import OverlayItem from '../components/OverlayItem';
 import axios from 'axios';
 
-// Backend URL
+// Backend URL Configuration
+// For web development: use localhost or the same host
 // For Physical Devices: Use your computer's IP address (find it with: ipconfig on Windows, ifconfig on Mac/Linux)
 // For Android Emulator: Use 10.0.2.2
 // For iOS Simulator: Use localhost
-// IMPORTANT: Change this to your computer's IP when using a physical device
-const API_URL = 'http://192.168.29.117:8000'; // Change this to your computer's IP address
+const getApiUrl = () => {
+    if (Platform.OS === 'web') {
+        // For web, use localhost or current host
+        // Check if we're on localhost or a different host
+        if (typeof window !== 'undefined' && window.location) {
+            const hostname = window.location.hostname;
+            // If on localhost, use localhost for backend too
+            if (hostname === 'localhost' || hostname === '127.0.0.1') {
+                return 'http://localhost:8000';
+            }
+            // Otherwise use the same host (useful for deployed apps)
+            return `http://${hostname}:8000`;
+        }
+        return 'http://localhost:8000';
+    }
+    // For native apps, use IP address
+    return 'http://192.168.29.117:8000';
+};
+
+const API_URL = getApiUrl();
 
 const { width, height } = Dimensions.get('window');
 
@@ -27,6 +46,32 @@ export default function EditorScreen() {
     const [progress, setProgress] = useState(0);
 
     const videoRef = useRef(null);
+
+    const resetEditor = () => {
+        setVideoUri(null);
+        setOverlays([]);
+        setSelectedOverlayId(null);
+        setUploading(false);
+        setProcessing(false);
+        setJobId(null);
+        setDownloadUrl(null);
+        setProgress(0);
+    };
+
+    const confirmNewProject = () => {
+        if (videoUri && !downloadUrl) {
+            Alert.alert(
+                "New Project",
+                "Discard current project and start a new one?",
+                [
+                    { text: "Cancel", style: "cancel" },
+                    { text: "Discard & New", style: "destructive", onPress: resetEditor }
+                ]
+            );
+        } else {
+            resetEditor();
+        }
+    };
 
     const pickVideo = async () => {
         let result = await ImagePicker.launchImageLibraryAsync({
@@ -123,22 +168,40 @@ export default function EditorScreen() {
 
         try {
             const formData = new FormData();
-            // Main Video
-            formData.append('video', {
-                uri: videoUri,
-                name: 'video.mp4',
-                type: 'video/mp4',
-            });
+
+            // Handle video file - different approach for web vs native
+            if (Platform.OS === 'web') {
+                // For web: Need to fetch the blob from the URI
+                console.log('Fetching video blob from:', videoUri);
+                const videoResponse = await fetch(videoUri);
+                const videoBlob = await videoResponse.blob();
+                formData.append('video', videoBlob, 'video.mp4');
+                console.log('Video blob size:', videoBlob.size);
+            } else {
+                // For native (iOS/Android)
+                formData.append('video', {
+                    uri: videoUri,
+                    name: 'video.mp4',
+                    type: 'video/mp4',
+                });
+            }
 
             // Overlay Assets (images and videos)
             const assetOverlays = overlays.filter(o => o.type === 'image' || o.type === 'video');
-            assetOverlays.forEach((ov) => {
-                formData.append('assets', {
-                    uri: ov.uri,
-                    name: ov.content,
-                    type: ov.type === 'video' ? 'video/mp4' : 'image/png'
-                });
-            });
+            for (const ov of assetOverlays) {
+                if (Platform.OS === 'web') {
+                    // For web: Need to fetch the blob from the URI
+                    const assetResponse = await fetch(ov.uri);
+                    const assetBlob = await assetResponse.blob();
+                    formData.append('assets', assetBlob, ov.content);
+                } else {
+                    formData.append('assets', {
+                        uri: ov.uri,
+                        name: ov.content,
+                        type: ov.type === 'video' ? 'video/mp4' : 'image/png'
+                    });
+                }
+            }
 
             // Metadata
             // Clean metadata for backend (remove uri, select props)
@@ -147,15 +210,56 @@ export default function EditorScreen() {
             }));
             formData.append('metadata', JSON.stringify(metadata));
 
-            const response = await axios.post(`${API_URL}/upload`, formData, {
-                headers: { 'Content-Type': 'multipart/form-data' },
-                timeout: 300000, // 5 minute timeout for large uploads
+            console.log('Sending upload request to:', `${API_URL}/upload`);
+
+            // Use XMLHttpRequest for better progress tracking on web
+            const response = await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+
+                xhr.upload.addEventListener('progress', (event) => {
+                    if (event.lengthComputable) {
+                        const uploadPercent = Math.round((event.loaded * 100) / event.total);
+                        console.log('Upload progress:', uploadPercent + '%');
+                        setProgress(uploadPercent);
+                    } else {
+                        // If total is not available, show indeterminate progress
+                        setProgress(prev => Math.min(prev + 1, 95));
+                    }
+                });
+
+                xhr.addEventListener('load', () => {
+                    console.log('Upload complete, status:', xhr.status);
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            resolve(JSON.parse(xhr.responseText));
+                        } catch (e) {
+                            reject(new Error('Invalid JSON response'));
+                        }
+                    } else {
+                        reject(new Error(`Upload failed with status ${xhr.status}: ${xhr.responseText}`));
+                    }
+                });
+
+                xhr.addEventListener('error', () => {
+                    console.error('XHR error');
+                    reject(new Error('Network error during upload'));
+                });
+
+                xhr.addEventListener('timeout', () => {
+                    reject(new Error('Upload timed out'));
+                });
+
+                xhr.open('POST', `${API_URL}/upload`);
+                xhr.timeout = 600000; // 10 minute timeout
+                xhr.send(formData);
             });
 
-            const { job_id } = response.data;
+            console.log('Upload response:', response);
+            const { job_id } = response;
             setJobId(job_id);
             setUploading(false);
             setProcessing(true);
+            setProgress(0); // Reset progress for processing phase
             pollStatus(job_id);
 
         } catch (e) {
@@ -170,10 +274,10 @@ export default function EditorScreen() {
     const pollStatus = async (id) => {
         let pollCount = 0;
         const maxPolls = 300; // 10 minutes max (300 * 2 seconds)
-        
+
         const interval = setInterval(async () => {
             pollCount++;
-            
+
             // Timeout after max polls
             if (pollCount > maxPolls) {
                 clearInterval(interval);
@@ -182,16 +286,16 @@ export default function EditorScreen() {
                 Alert.alert("Timeout", "Video processing is taking too long. Please try again.");
                 return;
             }
-            
+
             try {
                 const res = await axios.get(`${API_URL}/status/${id}`);
                 const { status, progress: prog, error } = res.data;
-                
+
                 // Update progress if available
                 if (prog !== undefined) {
                     setProgress(prog);
                 }
-                
+
                 if (status === 'completed') {
                     clearInterval(interval);
                     setProcessing(false);
@@ -212,7 +316,7 @@ export default function EditorScreen() {
     };
 
     return (
-        <KeyboardAvoidingView 
+        <KeyboardAvoidingView
             behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             style={{ flex: 1 }}
             keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
@@ -221,184 +325,206 @@ export default function EditorScreen() {
                 {/* Header */}
                 <View style={styles.header}>
                     <Text style={styles.logo}>ShutterCut</Text>
+                    {videoUri && (
+                        <TouchableOpacity onPress={confirmNewProject} style={styles.newBtn}>
+                            <Text style={styles.newBtnText}>+ New Project</Text>
+                        </TouchableOpacity>
+                    )}
                 </View>
 
                 {/* Video Preview Area */}
                 <View style={styles.previewContainer}>
-                {videoUri ? (
-                    <View style={styles.videoWrapper}>
-                        <Video
-                            ref={videoRef}
-                            style={styles.video}
-                            source={{ uri: videoUri }}
-                            useNativeControls
-                            resizeMode={ResizeMode.CONTAIN}
-                            isLooping
-                        />
-                        {/* Overlays Layer */}
-                        <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-                            {overlays.map((ov) => (
-                                <OverlayItem
-                                    key={ov.id}
-                                    item={ov}
-                                    isSelected={selectedOverlayId === ov.id}
-                                    onUpdate={(id, pos) => updateOverlay(id, pos)}
-                                    onSelect={() => setSelectedOverlayId(ov.id)}
-                                />
-                            ))}
+                    {videoUri ? (
+                        <View style={styles.videoWrapper}>
+                            <Video
+                                ref={videoRef}
+                                style={styles.video}
+                                source={{ uri: videoUri }}
+                                useNativeControls
+                                resizeMode={ResizeMode.CONTAIN}
+                                isLooping
+                            />
+                            {/* Overlays Layer */}
+                            <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+                                {overlays.map((ov) => (
+                                    <OverlayItem
+                                        key={ov.id}
+                                        item={ov}
+                                        isSelected={selectedOverlayId === ov.id}
+                                        onUpdate={(id, pos) => updateOverlay(id, pos)}
+                                        onSelect={() => setSelectedOverlayId(ov.id)}
+                                    />
+                                ))}
+                            </View>
                         </View>
-                    </View>
-                ) : (
-                    <TouchableOpacity style={styles.placeholder} onPress={pickVideo}>
-                        <Text style={styles.placeholderText}>+ Tap to Select Video</Text>
+                    ) : (
+                        <TouchableOpacity style={styles.placeholder} onPress={pickVideo}>
+                            <Text style={styles.placeholderText}>+ Tap to Select Video</Text>
+                        </TouchableOpacity>
+                    )}
+                </View>
+
+                {/* Controls */}
+                <View style={styles.controls}>
+                    <TouchableOpacity style={styles.btn} onPress={addTextOverlay}>
+                        <Text style={styles.btnText}>+ Text</Text>
                     </TouchableOpacity>
-                )}
-            </View>
-
-            {/* Controls */}
-            <View style={styles.controls}>
-                <TouchableOpacity style={styles.btn} onPress={addTextOverlay}>
-                    <Text style={styles.btnText}>+ Text</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btn} onPress={addImageOverlay}>
-                    <Text style={styles.btnText}>+ Image</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.btn} onPress={addVideoOverlay}>
-                    <Text style={styles.btnText}>+ Video</Text>
-                </TouchableOpacity>
-
-                <View style={{ flex: 1 }} />
-
-                {downloadUrl ? (
-                    <TouchableOpacity style={[styles.btn, styles.primaryBtn]} onPress={() => Alert.alert("Download", "Feature coming soon (or copy URL)")}>
-                        <Text style={styles.btnText}>Download</Text>
+                    <TouchableOpacity style={styles.btn} onPress={addImageOverlay}>
+                        <Text style={styles.btnText}>+ Image</Text>
                     </TouchableOpacity>
-                ) : (
-                    <TouchableOpacity
-                        style={[styles.btn, styles.primaryBtn, (uploading || processing || !videoUri) && styles.disabledBtn]}
-                        onPress={handleSubmit}
-                        disabled={uploading || processing || !videoUri}
-                    >
-                        {uploading ? <ActivityIndicator color="#fff" /> :
-                            processing ? <Text style={styles.btnText}>Processing {progress}%</Text> :
-                                <Text style={styles.btnText}>Export</Text>}
+                    <TouchableOpacity style={styles.btn} onPress={addVideoOverlay}>
+                        <Text style={styles.btnText}>+ Video</Text>
                     </TouchableOpacity>
-                )}
-            </View>
 
-            {/* Selected Overlay Inspector */}
-            {selectedOverlayId && (() => {
-                const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
-                if (!selectedOverlay) return null;
-                
-                return (
-                    <ScrollView 
-                        style={styles.inspector}
-                        contentContainerStyle={styles.inspectorContent}
-                        keyboardShouldPersistTaps="handled"
-                        showsVerticalScrollIndicator={true}
-                    >
-                        <View style={styles.inspectorHeader}>
-                            <Text style={styles.inspectorTitle}>Edit {selectedOverlay.type.toUpperCase()}</Text>
-                            <TouchableOpacity onPress={() => {
-                                setOverlays(overlays.filter(o => o.id !== selectedOverlayId));
-                                setSelectedOverlayId(null);
+                    <View style={{ flex: 1 }} />
+
+                    {downloadUrl ? (
+                        <View style={{ flexDirection: 'row', gap: 10 }}>
+                            <TouchableOpacity style={styles.btn} onPress={resetEditor}>
+                                <Text style={styles.btnText}>New Video</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.btn, styles.primaryBtn]} onPress={() => {
+                                if (downloadUrl) {
+                                    Linking.openURL(downloadUrl).catch(err => {
+                                        console.error("Couldn't load page", err);
+                                        Alert.alert("Error", "Could not open download link.");
+                                    });
+                                }
                             }}>
-                                <Text style={styles.deleteBtn}>🗑️ Delete</Text>
+                                <Text style={styles.btnText}>Download</Text>
                             </TouchableOpacity>
                         </View>
+                    ) : (
+                        <TouchableOpacity
+                            style={[styles.btn, styles.primaryBtn, (uploading || processing || !videoUri) && styles.disabledBtn]}
+                            onPress={handleSubmit}
+                            disabled={uploading || processing || !videoUri}
+                        >
+                            {uploading ? (
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                    <ActivityIndicator color="#fff" size="small" />
+                                    <Text style={styles.btnText}>Uploading {progress}%</Text>
+                                </View>
+                            ) :
+                                processing ? <Text style={styles.btnText}>Processing {progress}%</Text> :
+                                    <Text style={styles.btnText}>Export</Text>}
+                        </TouchableOpacity>
+                    )}
+                </View>
 
-                        {/* Text Content Editor */}
-                        {selectedOverlay.type === 'text' && (
+                {/* Selected Overlay Inspector */}
+                {selectedOverlayId && (() => {
+                    const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
+                    if (!selectedOverlay) return null;
+
+                    return (
+                        <ScrollView
+                            style={styles.inspector}
+                            contentContainerStyle={styles.inspectorContent}
+                            keyboardShouldPersistTaps="handled"
+                            showsVerticalScrollIndicator={true}
+                        >
+                            <View style={styles.inspectorHeader}>
+                                <Text style={styles.inspectorTitle}>Edit {selectedOverlay.type.toUpperCase()}</Text>
+                                <TouchableOpacity onPress={() => {
+                                    setOverlays(overlays.filter(o => o.id !== selectedOverlayId));
+                                    setSelectedOverlayId(null);
+                                }}>
+                                    <Text style={styles.deleteBtn}>🗑️ Delete</Text>
+                                </TouchableOpacity>
+                            </View>
+
+                            {/* Text Content Editor */}
+                            {selectedOverlay.type === 'text' && (
+                                <View style={styles.section}>
+                                    <Text style={styles.label}>Text Content:</Text>
+                                    <TextInput
+                                        style={styles.textInput}
+                                        value={selectedOverlay.content}
+                                        onChangeText={(text) => updateOverlay(selectedOverlayId, { content: text })}
+                                        placeholder="Enter text"
+                                        placeholderTextColor="#666"
+                                    />
+
+                                    <Text style={styles.label}>Font Size: {selectedOverlay.fontSize || 24}</Text>
+                                    <View style={styles.slider}>
+                                        <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { fontSize: Math.max(12, (selectedOverlay.fontSize || 24) - 2) })}>
+                                            <Text style={styles.sliderBtn}>-</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { fontSize: Math.min(72, (selectedOverlay.fontSize || 24) + 2) })}>
+                                            <Text style={styles.sliderBtn}>+</Text>
+                                        </TouchableOpacity>
+                                    </View>
+
+                                    <Text style={styles.label}>Color:</Text>
+                                    <View style={styles.colorPicker}>
+                                        {['#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF'].map(color => (
+                                            <TouchableOpacity
+                                                key={color}
+                                                style={[styles.colorBox, { backgroundColor: color }, selectedOverlay.color === color && styles.selectedColor]}
+                                                onPress={() => updateOverlay(selectedOverlayId, { color })}
+                                            />
+                                        ))}
+                                    </View>
+                                </View>
+                            )}
+
+                            {/* Size Controls for Images and Videos */}
+                            {(selectedOverlay.type === 'image' || selectedOverlay.type === 'video') && (
+                                <View style={styles.section}>
+                                    <Text style={styles.label}>Size: {selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150)}x{selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150)}</Text>
+                                    <View style={styles.slider}>
+                                        <TouchableOpacity onPress={() => {
+                                            const currentWidth = selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150);
+                                            const currentHeight = selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150);
+                                            updateOverlay(selectedOverlayId, {
+                                                width: Math.max(50, currentWidth - 10),
+                                                height: Math.max(50, currentHeight - 10)
+                                            });
+                                        }}>
+                                            <Text style={styles.sliderBtn}>Smaller</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity onPress={() => {
+                                            const currentWidth = selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150);
+                                            const currentHeight = selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150);
+                                            updateOverlay(selectedOverlayId, {
+                                                width: Math.min(400, currentWidth + 10),
+                                                height: Math.min(400, currentHeight + 10)
+                                            });
+                                        }}>
+                                            <Text style={styles.sliderBtn}>Larger</Text>
+                                        </TouchableOpacity>
+                                    </View>
+                                </View>
+                            )}
+
+                            {/* Timing Controls */}
                             <View style={styles.section}>
-                                <Text style={styles.label}>Text Content:</Text>
-                                <TextInput
-                                    style={styles.textInput}
-                                    value={selectedOverlay.content}
-                                    onChangeText={(text) => updateOverlay(selectedOverlayId, { content: text })}
-                                    placeholder="Enter text"
-                                    placeholderTextColor="#666"
-                                />
-                                
-                                <Text style={styles.label}>Font Size: {selectedOverlay.fontSize || 24}</Text>
+                                <Text style={styles.label}>Start Time: {selectedOverlay.start}s</Text>
                                 <View style={styles.slider}>
-                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { fontSize: Math.max(12, (selectedOverlay.fontSize || 24) - 2) })}>
-                                        <Text style={styles.sliderBtn}>-</Text>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: Math.max(0, selectedOverlay.start - 0.5) })}>
+                                        <Text style={styles.sliderBtn}>-0.5s</Text>
                                     </TouchableOpacity>
-                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { fontSize: Math.min(72, (selectedOverlay.fontSize || 24) + 2) })}>
-                                        <Text style={styles.sliderBtn}>+</Text>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: selectedOverlay.start + 0.5 })}>
+                                        <Text style={styles.sliderBtn}>+0.5s</Text>
                                     </TouchableOpacity>
                                 </View>
 
-                                <Text style={styles.label}>Color:</Text>
-                                <View style={styles.colorPicker}>
-                                    {['#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF'].map(color => (
-                                        <TouchableOpacity
-                                            key={color}
-                                            style={[styles.colorBox, { backgroundColor: color }, selectedOverlay.color === color && styles.selectedColor]}
-                                            onPress={() => updateOverlay(selectedOverlayId, { color })}
-                                        />
-                                    ))}
-                                </View>
-                            </View>
-                        )}
-
-                        {/* Size Controls for Images and Videos */}
-                        {(selectedOverlay.type === 'image' || selectedOverlay.type === 'video') && (
-                            <View style={styles.section}>
-                                <Text style={styles.label}>Size: {selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150)}x{selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150)}</Text>
+                                <Text style={styles.label}>End Time: {selectedOverlay.end}s</Text>
                                 <View style={styles.slider}>
-                                    <TouchableOpacity onPress={() => {
-                                        const currentWidth = selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150);
-                                        const currentHeight = selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150);
-                                        updateOverlay(selectedOverlayId, { 
-                                            width: Math.max(50, currentWidth - 10),
-                                            height: Math.max(50, currentHeight - 10)
-                                        });
-                                    }}>
-                                        <Text style={styles.sliderBtn}>Smaller</Text>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: Math.max(selectedOverlay.start + 0.5, selectedOverlay.end - 0.5) })}>
+                                        <Text style={styles.sliderBtn}>-0.5s</Text>
                                     </TouchableOpacity>
-                                    <TouchableOpacity onPress={() => {
-                                        const currentWidth = selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150);
-                                        const currentHeight = selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150);
-                                        updateOverlay(selectedOverlayId, { 
-                                            width: Math.min(400, currentWidth + 10),
-                                            height: Math.min(400, currentHeight + 10)
-                                        });
-                                    }}>
-                                        <Text style={styles.sliderBtn}>Larger</Text>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: selectedOverlay.end + 0.5 })}>
+                                        <Text style={styles.sliderBtn}>+0.5s</Text>
                                     </TouchableOpacity>
                                 </View>
-                            </View>
-                        )}
 
-                        {/* Timing Controls */}
-                        <View style={styles.section}>
-                            <Text style={styles.label}>Start Time: {selectedOverlay.start}s</Text>
-                            <View style={styles.slider}>
-                                <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: Math.max(0, selectedOverlay.start - 0.5) })}>
-                                    <Text style={styles.sliderBtn}>-0.5s</Text>
-                                </TouchableOpacity>
-                                <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: selectedOverlay.start + 0.5 })}>
-                                    <Text style={styles.sliderBtn}>+0.5s</Text>
-                                </TouchableOpacity>
+                                <Text style={styles.hint}>Duration: {(selectedOverlay.end - selectedOverlay.start).toFixed(1)}s</Text>
                             </View>
-
-                            <Text style={styles.label}>End Time: {selectedOverlay.end}s</Text>
-                            <View style={styles.slider}>
-                                <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: Math.max(selectedOverlay.start + 0.5, selectedOverlay.end - 0.5) })}>
-                                    <Text style={styles.sliderBtn}>-0.5s</Text>
-                                </TouchableOpacity>
-                                <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: selectedOverlay.end + 0.5 })}>
-                                    <Text style={styles.sliderBtn}>+0.5s</Text>
-                                </TouchableOpacity>
-                            </View>
-                            
-                            <Text style={styles.hint}>Duration: {(selectedOverlay.end - selectedOverlay.start).toFixed(1)}s</Text>
-                        </View>
-                    </ScrollView>
-                );
-            })()}
+                        </ScrollView>
+                    );
+                })()}
 
             </LinearGradient>
         </KeyboardAvoidingView>
@@ -413,6 +539,9 @@ const styles = StyleSheet.create({
     header: {
         paddingHorizontal: theme.spacing.l,
         marginBottom: theme.spacing.m,
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
     },
     logo: {
         fontFamily: theme.typography.fontFamilyBold,
@@ -548,5 +677,16 @@ const styles = StyleSheet.create({
         fontSize: 11,
         fontStyle: 'italic',
         marginTop: 4,
+    },
+    newBtn: {
+        backgroundColor: 'rgba(255, 255, 255, 0.1)',
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+        borderRadius: theme.borderRadius.full,
+    },
+    newBtnText: {
+        color: theme.colors.primary,
+        fontFamily: theme.typography.fontFamilyBold,
+        fontSize: 14,
     }
 });

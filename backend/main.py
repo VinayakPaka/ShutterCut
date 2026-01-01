@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Optional
 import uuid
+import aiofiles
 
 # Import our ffmpeg setup utility - handle both package and direct run
 try:
@@ -100,19 +101,40 @@ async def upload_video(
 ):
     try:
         job_id = str(uuid.uuid4())
-        video_path = UPLOAD_DIR / f"{job_id}_{video.filename}"
         
-        # Save Main Video
-        with open(video_path, "wb") as buffer:
-            shutil.copyfileobj(video.file, buffer)
+        # Handle filename - web blobs might have None or 'blob' as filename
+        video_filename = video.filename if video.filename and video.filename != 'blob' else 'video.mp4'
+        video_path = UPLOAD_DIR / f"{job_id}_{video_filename}"
         
-        # Save Overlay Assets
+        print(f"[{job_id}] Starting upload - Video: {video_filename}")
+        
+        # Save Main Video using async chunked writing for better performance
+        # This prevents blocking the event loop during large file uploads
+        CHUNK_SIZE = 1024 * 1024  # 1MB chunks for better throughput
+        bytes_written = 0
+        async with aiofiles.open(video_path, "wb") as buffer:
+            while True:
+                chunk = await video.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                await buffer.write(chunk)
+                bytes_written += len(chunk)
+        
+        print(f"[{job_id}] Video saved: {bytes_written} bytes")
+        
+        # Save Overlay Assets using async I/O
         asset_paths = []
         if assets:
-            for asset in assets:
-                a_path = UPLOAD_DIR / f"{job_id}_asset_{asset.filename}"
-                with open(a_path, "wb") as buffer:
-                    shutil.copyfileobj(asset.file, buffer)
+            for idx, asset in enumerate(assets):
+                # Handle filename - web blobs might have None or 'blob' as filename  
+                asset_filename = asset.filename if asset.filename and asset.filename != 'blob' else f'asset_{idx}.png'
+                a_path = UPLOAD_DIR / f"{job_id}_asset_{asset_filename}"
+                async with aiofiles.open(a_path, "wb") as buffer:
+                    while True:
+                        chunk = await asset.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        await buffer.write(chunk)
                 asset_paths.append(a_path)
             
         try:
