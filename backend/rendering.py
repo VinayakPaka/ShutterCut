@@ -3,7 +3,12 @@ import json
 import shlex
 import os
 from pathlib import Path
-from .ffmpeg_utils import FFMPEG_EXE
+
+# Handle both package and direct run imports
+try:
+    from .ffmpeg_utils import FFMPEG_EXE
+except ImportError:
+    from ffmpeg_utils import FFMPEG_EXE
 
 def build_filter_complex(inputs, overlays):
     """
@@ -26,8 +31,8 @@ def build_filter_complex(inputs, overlays):
         ov_type = ov.get("type", "text")
         start = float(ov.get("start", 0))
         end = float(ov.get("end", 5)) # Default duration
-        x = ov.get("x", 0)
-        y = ov.get("y", 0)
+        x = int(ov.get("x", 0))
+        y = int(ov.get("y", 0))
         
         # Enable expression: "between(t, start, end)"
         enable_expr = f"enable='between(t,{start},{end})'"
@@ -37,17 +42,19 @@ def build_filter_complex(inputs, overlays):
         if ov_type == "text":
             text = ov.get("content", "Text")
             # Text overlay using drawtext
-            # usage: [prev]drawtext=...[next]
-            # Need fontfile ideally, or use default
-            font_size = ov.get("fontSize", 24)
+            font_size = int(ov.get("fontSize", 24))
             font_color = ov.get("color", "white")
             
-            # Escape text for ffmpeg
-            safe_text = text.replace(":", "\\:").replace("'", "'") 
+            # Clean color - remove # if present
+            if font_color.startswith("#"):
+                font_color = font_color[1:]
+            
+            # Escape text for ffmpeg - escape special characters
+            safe_text = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             
             filter_cmd = (
                 f"{current_stream}drawtext=text='{safe_text}':"
-                f"x={x}:y={y}:fontsize={font_size}:fontcolor={font_color}:"
+                f"x={x}:y={y}:fontsize={font_size}:fontcolor=0x{font_color}:"
                 f"{enable_expr}{output_label}"
             )
             filter_chains.append(filter_cmd)
@@ -133,6 +140,7 @@ def render_video(job_id, main_video, overlay_assets, overlays, output_path, prog
     
     # Get video duration for progress calculation
     duration = get_video_duration(main_video)
+    print(f"Video duration: {duration}s")
     
     # Prepare inputs
     inputs = [main_video] + overlay_assets
@@ -143,62 +151,91 @@ def render_video(job_id, main_video, overlay_assets, overlays, output_path, prog
     # Build filter complex
     filter_str, final_map = build_filter_complex(inputs, overlays)
     
-    cmd = [str(FFMPEG_EXE), "-y", "-progress", "pipe:1"] + input_args
+    print(f"Filter complex: {filter_str}")
+    print(f"Final map: {final_map}")
+    
+    cmd = [str(FFMPEG_EXE), "-y"] + input_args
     
     if filter_str:
         # With overlays - need to re-encode
         cmd.extend(["-filter_complex", filter_str, "-map", final_map, "-map", "0:a?"])
-        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "copy"])
+        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-movflags", "+faststart"])
     else:
         # No overlays, just copy
-        cmd.extend(["-c", "copy"])
+        cmd.extend(["-c", "copy", "-movflags", "+faststart"])
     
     cmd.append(str(output_path))
     
     print(f"Running FFmpeg: {' '.join(cmd)}")
     
-    # Run with progress tracking
-    process = subprocess.Popen(
-        cmd, 
-        stdout=subprocess.PIPE, 
-        stderr=subprocess.PIPE, 
-        universal_newlines=True,
-        bufsize=1
-    )
-    
-    # Collect stderr in background
-    stderr_output = []
-    
-    # Parse progress from stdout
-    for line in process.stdout:
-        if line.startswith("out_time_ms="):
-            try:
-                time_ms = int(line.split("=")[1].strip())
-                time_sec = time_ms / 1000000.0
-                if duration > 0 and progress_callback:
-                    progress = min(99, int((time_sec / duration) * 100))
-                    progress_callback(job_id, progress)
-            except:
-                pass
-    
-    # Wait for process to finish and get stderr
-    _, stderr = process.communicate()
-    
-    if process.returncode != 0:
-        print(f"FFmpeg Error (code {process.returncode}):")
-        print(stderr)
-        raise Exception(f"FFmpeg failed: {stderr[:500]}")
-    
-    # Set to 100% on completion
-    if progress_callback:
-        progress_callback(job_id, 100)
+    # Run FFmpeg and capture output with progress tracking
+    try:
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT,  # Redirect stderr to stdout
+            universal_newlines=True,
+            bufsize=1
+        )
         
-    return output_path
+        # Track progress by reading output in real-time
+        output_lines = []
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            output_lines.append(line)
+            print(line.rstrip())  # Print progress in real-time
+            
+            # Parse FFmpeg progress from output (time=00:00:10.50)
+            if 'time=' in line and duration > 0:
+                try:
+                    time_str = line.split('time=')[1].split()[0]
+                    # Parse time format HH:MM:SS.ms
+                    parts = time_str.split(':')
+                    if len(parts) == 3:
+                        hours = float(parts[0])
+                        minutes = float(parts[1])
+                        seconds = float(parts[2])
+                        current_time = hours * 3600 + minutes * 60 + seconds
+                        progress_pct = min(99, (current_time / duration) * 100)
+                        if progress_callback:
+                            progress_callback(job_id, progress_pct)
+                except Exception as e:
+                    pass
+        
+        process.wait()
+        output = ''.join(output_lines)
+        
+        print(f"FFmpeg output (last 1000 chars): {output[-1000:]}")
+        
+        if process.returncode != 0:
+            error_msg = f"FFmpeg failed (code {process.returncode}): {output[-1000:]}"
+            print(error_msg)
+            raise Exception(error_msg)
+        
+        # Verify output file exists and has content
+        if not output_path.exists() or output_path.stat().st_size < 100:
+            raise Exception(f"Output file is empty or missing. FFmpeg output: {output[-500:]}")
+        
+        # Set to 100% on completion
+        if progress_callback:
+            progress_callback(job_id, 100)
+            
+        print(f"Render complete: {output_path} ({output_path.stat().st_size} bytes)")
+        return output_path
+        
+    except Exception as e:
+        print(f"Render error: {e}")
+        raise
 
 def get_video_duration(video_path):
     """Get video duration in seconds using ffprobe."""
     try:
-        from .ffmpeg_utils import FFPROBE_EXE
+        try:
+            from .ffmpeg_utils import FFPROBE_EXE
+        except ImportError:
+            from ffmpeg_utils import FFPROBE_EXE
         cmd = [
             str(FFPROBE_EXE),
             "-v", "error",
@@ -207,8 +244,8 @@ def get_video_duration(video_path):
             str(video_path)
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip():
             return float(result.stdout.strip())
-    except:
-        pass
-    return 0
+    except Exception as e:
+        print(f"Error getting video duration: {e}")
+    return 10  # Default to 10 seconds if we can't determine duration

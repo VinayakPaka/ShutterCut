@@ -1,6 +1,6 @@
-fastapi
-uvicorn
+fastapi==0.109.0
+uvicorn==0.27.0
 python-multipart
 aiofiles
 requests
-# ffmpeg-python # We might use subprocess for better control over the binary path
+starlette==0.35.1

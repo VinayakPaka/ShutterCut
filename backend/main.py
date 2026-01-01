@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Optional
 import uuid
 
-# Import our ffmpeg setup utility
-from .ffmpeg_utils import add_ffmpeg_to_path
+# Import our ffmpeg setup utility - handle both package and direct run
+try:
+    from .ffmpeg_utils import add_ffmpeg_to_path
+except ImportError:
+    from ffmpeg_utils import add_ffmpeg_to_path
 
 # Ensure FFmpeg is available
 add_ffmpeg_to_path()
@@ -60,8 +63,11 @@ def update_job_progress(job_id: str, progress: float):
     if job_id in jobs:
         jobs[job_id]["progress"] = progress
 
-# Import rendering logic
-from .rendering import render_video
+# Import rendering logic - handle both package and direct run
+try:
+    from .rendering import render_video
+except ImportError:
+    from rendering import render_video
 
 def process_video(job_id: str, video_path: Path, overlay_assets: list, metadata: list):
     """

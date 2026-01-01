@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Dimensions, ActivityIndicator, Alert, TextInput, ScrollView, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Dimensions, ActivityIndicator, Alert, TextInput, ScrollView, Platform, KeyboardAvoidingView } from 'react-native';
 import { Video, ResizeMode } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -212,14 +212,19 @@ export default function EditorScreen() {
     };
 
     return (
-        <LinearGradient colors={[theme.colors.background, '#1a1a2e']} style={styles.container}>
-            {/* Header */}
-            <View style={styles.header}>
-                <Text style={styles.logo}>ShutterCut</Text>
-            </View>
+        <KeyboardAvoidingView 
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1 }}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        >
+            <LinearGradient colors={[theme.colors.background, '#1a1a2e']} style={styles.container}>
+                {/* Header */}
+                <View style={styles.header}>
+                    <Text style={styles.logo}>ShutterCut</Text>
+                </View>
 
-            {/* Video Preview Area */}
-            <View style={styles.previewContainer}>
+                {/* Video Preview Area */}
+                <View style={styles.previewContainer}>
                 {videoUri ? (
                     <View style={styles.videoWrapper}>
                         <Video
@@ -287,7 +292,12 @@ export default function EditorScreen() {
                 if (!selectedOverlay) return null;
                 
                 return (
-                    <ScrollView style={styles.inspector}>
+                    <ScrollView 
+                        style={styles.inspector}
+                        contentContainerStyle={styles.inspectorContent}
+                        keyboardShouldPersistTaps="handled"
+                        showsVerticalScrollIndicator={true}
+                    >
                         <View style={styles.inspectorHeader}>
                             <Text style={styles.inspectorTitle}>Edit {selectedOverlay.type.toUpperCase()}</Text>
                             <TouchableOpacity onPress={() => {
@@ -390,14 +400,15 @@ export default function EditorScreen() {
                 );
             })()}
 
-        </LinearGradient>
+            </LinearGradient>
+        </KeyboardAvoidingView>
     );
 }
 
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        paddingTop: 50,
+        paddingTop: Platform.OS === 'ios' ? 50 : 30,
     },
     header: {
         paddingHorizontal: theme.spacing.l,
@@ -410,7 +421,7 @@ const styles = StyleSheet.create({
     },
     previewContainer: {
         width: '100%',
-        height: height * 0.5, // Half screen
+        height: height * 0.45, // Slightly reduced for better space management
         backgroundColor: 'black',
         justifyContent: 'center',
         alignItems: 'center',
@@ -438,12 +449,17 @@ const styles = StyleSheet.create({
         padding: theme.spacing.l,
         alignItems: 'center',
         gap: theme.spacing.m,
+        flexWrap: 'wrap',
+        paddingBottom: Platform.OS === 'ios' ? 20 : theme.spacing.l,
     },
     btn: {
         backgroundColor: theme.colors.surfaceHighlight,
         paddingVertical: theme.spacing.m,
         paddingHorizontal: theme.spacing.l,
         borderRadius: theme.borderRadius.full,
+        minHeight: 44, // iOS minimum touch target
+        justifyContent: 'center',
+        alignItems: 'center',
     },
     primaryBtn: {
         backgroundColor: theme.colors.primary,
@@ -460,7 +476,10 @@ const styles = StyleSheet.create({
         backgroundColor: theme.colors.surface,
         margin: theme.spacing.m,
         borderRadius: theme.borderRadius.m,
-        maxHeight: 250,
+        maxHeight: 300,
+    },
+    inspectorContent: {
+        paddingBottom: theme.spacing.xl,
     },
     inspectorHeader: {
         flexDirection: 'row',
