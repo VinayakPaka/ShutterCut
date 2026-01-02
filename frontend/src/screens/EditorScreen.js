@@ -5,6 +5,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { theme } from '../constants/theme';
 import OverlayItem from '../components/OverlayItem';
+import Logo from '../components/Logo';
 import axios from 'axios';
 
 // Backend URL Configuration
@@ -47,6 +48,31 @@ export default function EditorScreen() {
 
     const [videoMeta, setVideoMeta] = useState({ width: 0, height: 0, duration: 0 });
     const [playbackStatus, setPlaybackStatus] = useState({});
+
+    // Memoize video source to prevent reloads on re-renders
+    const videoSource = React.useMemo(() => (videoUri ? { uri: videoUri } : null), [videoUri]);
+
+    // Throttle playback status updates to reduce re-renders (update at most every 200ms)
+    const lastStatusUpdateRef = useRef(0);
+    const lastIsPlayingRef = useRef(false);
+
+    const handlePlaybackStatusUpdate = React.useCallback((status) => {
+        const now = Date.now();
+
+        // Always update immediately for play/pause state changes
+        if (status.isPlaying !== lastIsPlayingRef.current) {
+            lastIsPlayingRef.current = status.isPlaying;
+            lastStatusUpdateRef.current = now;
+            setPlaybackStatus(status);
+            return;
+        }
+
+        // Throttle position updates to every 200ms
+        if (now - lastStatusUpdateRef.current > 200) {
+            lastStatusUpdateRef.current = now;
+            setPlaybackStatus(status);
+        }
+    }, []);
 
     const videoRef = useRef(null);
 
@@ -202,6 +228,22 @@ export default function EditorScreen() {
         setUploading(true);
         setProgress(0);
 
+        // First test if we can reach the backend
+        try {
+            console.log('Testing backend connectivity...');
+            const testResponse = await axios.get(`${API_URL}/`, { timeout: 5000 });
+            console.log('Backend reachable:', testResponse.data.status);
+        } catch (connectError) {
+            console.error('Backend connectivity test failed:', connectError.message);
+            Alert.alert(
+                "Cannot Connect to Server",
+                `Unable to reach ${API_URL}\n\nPlease check:\n1. Backend is running (python main.py)\n2. Phone and PC are on same WiFi network\n3. Windows Firewall allows port 8000\n\nRun OneClickFirewallFix.bat as Admin if needed.`
+            );
+            setUploading(false);
+            setProgress(0);
+            return;
+        }
+
         try {
             const formData = new FormData();
 
@@ -320,32 +362,89 @@ export default function EditorScreen() {
 
             console.log('Sending upload request to:', `${API_URL}/upload`);
 
-            // Use Axios for upload
-            const response = await axios.post(`${API_URL}/upload`, formData, {
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                },
-                onUploadProgress: (progressEvent) => {
-                    if (progressEvent.total) {
-                        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            // Use native fetch instead of Axios for better reliability with multipart on Android
+            const xhr = new XMLHttpRequest();
+
+            const promise = new Promise((resolve, reject) => {
+                xhr.open('POST', `${API_URL}/upload`);
+
+                // Track upload progress
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) {
+                        const percentCompleted = Math.round((event.loaded * 100) / event.total);
                         console.log('Upload progress:', percentCompleted + '%');
                         setProgress(percentCompleted);
                     }
-                },
-                timeout: 600000, // 10 minute timeout
+                };
+
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            const response = JSON.parse(xhr.response);
+                            resolve(response);
+                        } catch (e) {
+                            reject(new Error("Invalid JSON response from server"));
+                        }
+                    } else {
+                        reject({
+                            message: `Upload failed with status ${xhr.status}`,
+                            code: 'UPLOAD_FAILED',
+                            response: { status: xhr.status, data: xhr.response }
+                        });
+                    }
+                };
+
+                xhr.onerror = () => {
+                    reject({
+                        message: "Network request failed",
+                        code: 'ERR_NETWORK'
+                    });
+                };
+
+                xhr.ontimeout = () => {
+                    reject({
+                        message: "Request timed out",
+                        code: 'ETIMEDOUT'
+                    });
+                };
+
+                xhr.timeout = 600000; // 10 minutes
+                xhr.send(formData);
             });
 
-            console.log('Upload response:', response.data);
-            const { job_id } = response.data;
+            const responseData = await promise;
+
+            console.log('Upload response:', responseData);
+            const { job_id } = responseData;
             setJobId(job_id);
             setUploading(false);
             setProcessing(true);
-            setProgress(0); // Reset progress for processing phase
+            setProgress(0);
             pollStatus(job_id);
 
         } catch (e) {
-            console.error('Upload error details:', e.toJSON ? e.toJSON() : e);
-            const errorMsg = e.response?.data?.detail || e.message || "Could not upload video. Please check your connection.";
+            // Enhanced error logging for debugging
+            console.error('Upload error details:');
+            console.error('  - Message:', e.message);
+            console.error('  - Code:', e.code);
+            console.error('  - Request URL:', `${API_URL}/upload`);
+            if (e.response) {
+                console.error('  - Response Status:', e.response.status);
+                console.error('  - Response Data:', e.response.data);
+            } else if (e.request) {
+                console.error('  - No response received (network issue or server unreachable)');
+                console.error('  - Request was made but no response came back');
+            }
+
+            let errorMsg;
+            if (e.code === 'ECONNREFUSED' || e.code === 'ERR_NETWORK') {
+                errorMsg = `Cannot connect to server at ${API_URL}. Make sure:\n\n1. Backend is running (python main.py)\n2. Phone and PC are on same WiFi\n3. Firewall allows port 8000`;
+            } else if (e.response?.data?.detail) {
+                errorMsg = e.response.data.detail;
+            } else {
+                errorMsg = e.message || "Could not upload video. Please check your connection.";
+            }
+
             Alert.alert("Upload Failed", errorMsg);
             setUploading(false);
             setProgress(0);
@@ -405,7 +504,10 @@ export default function EditorScreen() {
             <LinearGradient colors={[theme.colors.background, '#1a1a2e']} style={styles.container}>
                 {/* Header */}
                 <View style={styles.header}>
-                    <Text style={styles.logo}>ShutterCut</Text>
+                    <View style={styles.logoContainer}>
+                        <Logo size={40} />
+                        <Text style={styles.logoText}>ShutterCut</Text>
+                    </View>
                     {videoUri && (
                         <TouchableOpacity onPress={confirmNewProject} style={styles.newBtn}>
                             <Text style={styles.newBtnText}>+ New Project</Text>
@@ -420,11 +522,11 @@ export default function EditorScreen() {
                             <Video
                                 ref={videoRef}
                                 style={styles.video}
-                                source={{ uri: videoUri }}
+                                source={videoSource}
                                 useNativeControls
                                 resizeMode={ResizeMode.CONTAIN}
                                 isLooping
-                                onPlaybackStatusUpdate={status => setPlaybackStatus(() => status)}
+                                onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
                                 onLoad={(status) => {
                                     if (status.naturalSize) {
                                         console.log("Video Loaded:", status.naturalSize);
@@ -517,6 +619,7 @@ export default function EditorScreen() {
                             contentContainerStyle={styles.inspectorContent}
                             keyboardShouldPersistTaps="handled"
                             showsVerticalScrollIndicator={true}
+                            nestedScrollEnabled={true}
                         >
                             <View style={styles.inspectorHeader}>
                                 <Text style={styles.inspectorTitle}>Edit {selectedOverlay.type.toUpperCase()}</Text>
@@ -528,10 +631,37 @@ export default function EditorScreen() {
                                 </TouchableOpacity>
                             </View>
 
+                            {/* Timing Controls - Show first for all overlay types */}
+                            <View style={styles.section}>
+                                <Text style={styles.sectionTitle}>⏱️ Timing</Text>
+                                <Text style={styles.label}>Start Time: {selectedOverlay.start}s</Text>
+                                <View style={styles.slider}>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: Math.max(0, selectedOverlay.start - 0.5) })}>
+                                        <Text style={styles.sliderBtn}>-0.5s</Text>
+                                    </TouchableOpacity>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: selectedOverlay.start + 0.5 })}>
+                                        <Text style={styles.sliderBtn}>+0.5s</Text>
+                                    </TouchableOpacity>
+                                </View>
+
+                                <Text style={styles.label}>End Time: {selectedOverlay.end}s</Text>
+                                <View style={styles.slider}>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: Math.max(selectedOverlay.start + 0.5, selectedOverlay.end - 0.5) })}>
+                                        <Text style={styles.sliderBtn}>-0.5s</Text>
+                                    </TouchableOpacity>
+                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: selectedOverlay.end + 0.5 })}>
+                                        <Text style={styles.sliderBtn}>+0.5s</Text>
+                                    </TouchableOpacity>
+                                </View>
+
+                                <Text style={styles.hint}>Duration: {(selectedOverlay.end - selectedOverlay.start).toFixed(1)}s</Text>
+                            </View>
+
                             {/* Text Content Editor */}
                             {selectedOverlay.type === 'text' && (
                                 <View style={styles.section}>
-                                    <Text style={styles.label}>Text Content:</Text>
+                                    <Text style={styles.sectionTitle}>✏️ Text Style</Text>
+                                    <Text style={styles.label}>Content:</Text>
                                     <TextInput
                                         style={styles.textInput}
                                         value={selectedOverlay.content}
@@ -566,6 +696,7 @@ export default function EditorScreen() {
                             {/* Size Controls for Images and Videos */}
                             {(selectedOverlay.type === 'image' || selectedOverlay.type === 'video') && (
                                 <View style={styles.section}>
+                                    <Text style={styles.sectionTitle}>📐 Size</Text>
                                     <Text style={styles.label}>Size: {selectedOverlay.width || (selectedOverlay.type === 'image' ? 100 : 150)}x{selectedOverlay.height || (selectedOverlay.type === 'image' ? 100 : 150)}</Text>
                                     <View style={styles.slider}>
                                         <TouchableOpacity onPress={() => {
@@ -591,31 +722,6 @@ export default function EditorScreen() {
                                     </View>
                                 </View>
                             )}
-
-                            {/* Timing Controls */}
-                            <View style={styles.section}>
-                                <Text style={styles.label}>Start Time: {selectedOverlay.start}s</Text>
-                                <View style={styles.slider}>
-                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: Math.max(0, selectedOverlay.start - 0.5) })}>
-                                        <Text style={styles.sliderBtn}>-0.5s</Text>
-                                    </TouchableOpacity>
-                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { start: selectedOverlay.start + 0.5 })}>
-                                        <Text style={styles.sliderBtn}>+0.5s</Text>
-                                    </TouchableOpacity>
-                                </View>
-
-                                <Text style={styles.label}>End Time: {selectedOverlay.end}s</Text>
-                                <View style={styles.slider}>
-                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: Math.max(selectedOverlay.start + 0.5, selectedOverlay.end - 0.5) })}>
-                                        <Text style={styles.sliderBtn}>-0.5s</Text>
-                                    </TouchableOpacity>
-                                    <TouchableOpacity onPress={() => updateOverlay(selectedOverlayId, { end: selectedOverlay.end + 0.5 })}>
-                                        <Text style={styles.sliderBtn}>+0.5s</Text>
-                                    </TouchableOpacity>
-                                </View>
-
-                                <Text style={styles.hint}>Duration: {(selectedOverlay.end - selectedOverlay.start).toFixed(1)}s</Text>
-                            </View>
                         </ScrollView>
                     );
                 })()}
@@ -637,7 +743,12 @@ const styles = StyleSheet.create({
         justifyContent: 'space-between',
         alignItems: 'center',
     },
-    logo: {
+    logoContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.m,
+    },
+    logoText: {
         fontFamily: theme.typography.fontFamilyBold,
         fontSize: 28,
         color: theme.colors.text,
@@ -699,7 +810,8 @@ const styles = StyleSheet.create({
         backgroundColor: theme.colors.surface,
         margin: theme.spacing.m,
         borderRadius: theme.borderRadius.m,
-        maxHeight: 300,
+        maxHeight: 350,
+        flex: 0,
     },
     inspectorContent: {
         paddingBottom: theme.spacing.xl,
@@ -721,7 +833,16 @@ const styles = StyleSheet.create({
         fontFamily: theme.typography.fontFamily,
     },
     section: {
-        marginBottom: theme.spacing.m,
+        marginBottom: theme.spacing.l,
+        paddingBottom: theme.spacing.m,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(255,255,255,0.1)',
+    },
+    sectionTitle: {
+        color: theme.colors.primary,
+        fontFamily: theme.typography.fontFamilyBold,
+        fontSize: 14,
+        marginBottom: theme.spacing.s,
     },
     label: {
         color: theme.colors.textSecondary,

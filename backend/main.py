@@ -28,6 +28,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 @app.get("/")
@@ -99,6 +100,10 @@ async def upload_video(
     assets: list[UploadFile] = File(default=[]),
     metadata: str = Form(...)  # JSON string of overlays
 ):
+    print(f"\n{'='*50}")
+    print(f"UPLOAD REQUEST RECEIVED")
+    print(f"{'='*50}")
+    
     try:
         job_id = str(uuid.uuid4())
         
@@ -106,7 +111,10 @@ async def upload_video(
         video_filename = video.filename if video.filename and video.filename != 'blob' else 'video.mp4'
         video_path = UPLOAD_DIR / f"{job_id}_{video_filename}"
         
-        print(f"[{job_id}] Starting upload - Video: {video_filename}")
+        print(f"[{job_id}] Starting upload")
+        print(f"[{job_id}] Video filename: {video_filename}")
+        print(f"[{job_id}] Metadata length: {len(metadata)} chars")
+        print(f"[{job_id}] Number of assets: {len(assets)}")
         
         # Save Main Video using async chunked writing for better performance
         # This prevents blocking the event loop during large file uploads
@@ -119,8 +127,10 @@ async def upload_video(
                     break
                 await buffer.write(chunk)
                 bytes_written += len(chunk)
+                if bytes_written % (10 * CHUNK_SIZE) == 0:  # Log every 10MB
+                    print(f"[{job_id}] Video upload progress: {bytes_written / (1024*1024):.1f} MB")
         
-        print(f"[{job_id}] Video saved: {bytes_written} bytes")
+        print(f"[{job_id}] Video saved: {bytes_written / (1024*1024):.2f} MB")
         
         # Save Overlay Assets using async I/O
         asset_paths = []
@@ -136,7 +146,9 @@ async def upload_video(
                             break
                         await buffer.write(chunk)
                 asset_paths.append(a_path)
+                print(f"[{job_id}] Asset saved: {asset_filename}")
             
+        print(f"[{job_id}] Parsing metadata...")
         try:
             overlays = json.loads(metadata)
             
@@ -173,10 +185,15 @@ async def upload_video(
         # Trigger Background Processing
         background_tasks.add_task(process_video, job_id, video_path, asset_paths, overlays)
         
+        print(f"[{job_id}] Job queued successfully!")
+        print(f"{'='*50}\n")
+        
         return {"job_id": job_id, "status": "queued"}
         
     except Exception as e:
+        import traceback
         print(f"Upload error: {e}")
+        print(f"Traceback:\n{traceback.format_exc()}")
         return JSONResponse(
             status_code=500,
             content={"error": f"Upload failed: {str(e)}"}
@@ -207,4 +224,4 @@ def get_result(job_id: str):
     return FileResponse(job["result_path"], media_type="video/mp4", filename="edited_video.mp4")
 
 if __name__ == "__main__":
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

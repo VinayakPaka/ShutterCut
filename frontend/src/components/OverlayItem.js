@@ -1,11 +1,12 @@
-import React, { useRef, useEffect } from 'react';
-import { StyleSheet, Text, Image, View, PanResponder, Animated, TouchableOpacity } from 'react-native';
+import React, { useRef, useEffect, useMemo } from 'react';
+import { StyleSheet, Text, Image, View, PanResponder, Animated } from 'react-native';
 import { Video, ResizeMode } from 'expo-av';
 import { theme } from '../constants/theme';
 
 export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPlaying, currentTime }) {
     const pan = useRef(new Animated.ValueXY({ x: item.x || 0, y: item.y || 0 })).current;
     const videoRef = useRef(null);
+    const wasPlayingRef = useRef(false);
 
     // Sync local animated value with parent props (handle Inspector updates)
     useEffect(() => {
@@ -13,54 +14,46 @@ export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPl
         pan.setValue({ x: 0, y: 0 });
     }, [item.x, item.y]);
 
-    // Video Sync Logic
-    const wasPlayingRef = useRef(false);
-
+    // Video Sync Logic - ONLY runs for video type overlays
     useEffect(() => {
-        if (item.type === 'video' && videoRef.current) {
-            const start = item.start || 0;
-            const end = item.end || 5; // Default 5s if undefined, though parent usually sets it
+        // Skip this effect entirely for non-video overlays
+        if (item.type !== 'video' || !videoRef.current) {
+            return;
+        }
 
-            // Determine visibility based on current time
-            // If currentTime is undefined, we default to visible (initial state) or handle gracefully
-            const isVisible = currentTime === undefined || (currentTime >= start && currentTime <= end);
+        const start = item.start || 0;
+        const end = item.end || 5;
 
-            if (isVisible) {
-                const relativeTime = currentTime !== undefined ? Math.max(0, currentTime - start) : 0;
-                const seekTimeMillis = relativeTime * 1000;
+        // Determine visibility based on current time
+        const isInTimeRange = currentTime === undefined || (currentTime >= start && currentTime <= end);
 
-                if (isPlaying) {
-                    // If main video is playing
-                    if (!wasPlayingRef.current) {
-                        // We just started playing or entered the visible range
-                        videoRef.current.playFromPositionAsync(seekTimeMillis);
-                    }
-                } else {
-                    // Main video is paused
-                    if (wasPlayingRef.current) {
-                        // We just paused
-                        videoRef.current.pauseAsync();
-                    }
-                    // Sync the frame so it looks correct while paused
-                    // doing this strictly might be jittery, so maybe only if difference is large?
-                    // For now, let's just setPosition
-                    videoRef.current.setPositionAsync(seekTimeMillis);
+        if (isInTimeRange) {
+            const relativeTime = currentTime !== undefined ? Math.max(0, currentTime - start) : 0;
+            const seekTimeMillis = relativeTime * 1000;
+
+            if (isPlaying) {
+                if (!wasPlayingRef.current) {
+                    videoRef.current.playFromPositionAsync(seekTimeMillis).catch(() => { });
                 }
             } else {
-                // Not visible
                 if (wasPlayingRef.current) {
-                    videoRef.current.pauseAsync();
+                    videoRef.current.pauseAsync().catch(() => { });
                 }
+                videoRef.current.setPositionAsync(seekTimeMillis).catch(() => { });
             }
-
-            wasPlayingRef.current = isVisible && isPlaying;
+        } else {
+            if (wasPlayingRef.current) {
+                videoRef.current.pauseAsync().catch(() => { });
+            }
         }
-    }, [isPlaying, currentTime, item.start, item.end]);
 
-    const panResponder = useRef(
+        wasPlayingRef.current = isInTimeRange && isPlaying;
+    }, [item.type, isPlaying, currentTime, item.start, item.end]);
+
+    // Memoize PanResponder to prevent recreation on every render
+    const panResponder = useMemo(() =>
         PanResponder.create({
             onStartShouldSetPanResponder: () => {
-                // Select this overlay when touched
                 onSelect();
                 return true;
             },
@@ -69,17 +62,15 @@ export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPl
                 { useNativeDriver: false }
             ),
             onPanResponderRelease: (e, gesture) => {
-                // Update parent state with new position
                 const newX = (item.x || 0) + gesture.dx;
                 const newY = (item.y || 0) + gesture.dy;
                 onUpdate(item.id, { x: newX, y: newY });
-                // We don't strictly need to setOffset here because the useEffect will handle it
-                // when the prop updates, but it makes the UI feel more responsive immediately
                 pan.setOffset({ x: newX, y: newY });
                 pan.setValue({ x: 0, y: 0 });
             },
-        })
-    ).current;
+        }),
+        [item.id, item.x, item.y, onSelect, onUpdate, pan]
+    );
 
     // Get dimensions based on overlay type
     const getWidth = () => {
@@ -93,15 +84,13 @@ export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPl
     };
 
     // Calculate visibility based on current time for the container
-    const isVisible = currentTime === undefined || (currentTime >= (item.start || 0) && currentTime <= (item.end || 1000));
+    // If currentTime is undefined (video not started/loaded), show overlay for editing
+    const start = item.start || 0;
+    const end = item.end || 1000; // Large default so it shows during editing
+    const isVisible = currentTime === undefined || (currentTime >= start && currentTime <= end);
 
-    // We handle video playback manually in useEffect, so passing shouldPlay here is less critical 
-    // but good for initial state.
-    // However, we want to avoid conflicts with our manual control.
-    // Let's rely on useVideoPlayer or manual ref control.
-    // Setting shouldPlay={false} allows us to control it via methods entirely? 
-    // Actually, shouldPlay prop is declarative. Methods are imperative. Mixing them is tricky.
-    // Let's stick to imperative control in useEffect and set shouldPlay to a safe default or match state.
+    // Memoize source for video/image to prevent reloads
+    const mediaSource = useMemo(() => ({ uri: item.uri }), [item.uri]);
 
     return (
         <Animated.View
@@ -109,8 +98,10 @@ export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPl
                 styles.overlayContainer,
                 { transform: pan.getTranslateTransform() },
                 isSelected && styles.selected,
-                !isVisible && { opacity: 0 }
+                // Use opacity for visibility toggle - this is more performant than conditional rendering
+                { opacity: isVisible ? 1 : 0 }
             ]}
+            pointerEvents={isVisible ? 'auto' : 'none'}
             {...panResponder.panHandlers}
         >
             {item.type === 'text' ? (
@@ -119,24 +110,24 @@ export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPl
                 </Text>
             ) : item.type === 'image' ? (
                 <Image
-                    source={{ uri: item.uri }}
+                    source={mediaSource}
                     style={{
                         width: getWidth(),
                         height: getHeight(),
-                        resizeMode: 'contain'
                     }}
+                    resizeMode="contain"
                 />
             ) : item.type === 'video' ? (
                 <Video
                     ref={videoRef}
-                    source={{ uri: item.uri }}
+                    source={mediaSource}
                     style={{
                         width: getWidth(),
                         height: getHeight()
                     }}
                     resizeMode={ResizeMode.CONTAIN}
-                    shouldPlay={false} // We control playback imperatively
-                    isLooping={false} // We handle loop duration manually via start/end visibility
+                    shouldPlay={false}
+                    isLooping={false}
                     isMuted={true}
                 />
             ) : null}
@@ -147,8 +138,8 @@ export default function OverlayItem({ item, onUpdate, isSelected, onSelect, isPl
 const styles = StyleSheet.create({
     overlayContainer: {
         position: 'absolute',
-        padding: 10, // Increased touch area
-        minWidth: 44, // Minimum touch target
+        padding: 10,
+        minWidth: 44,
         minHeight: 44,
     },
     selected: {
