@@ -139,6 +139,22 @@ async def upload_video(
             
         try:
             overlays = json.loads(metadata)
+            
+            # Map overlays to the actual saved filenames on disk
+            # This ensures rendering.py can find the files in the input list
+            for ov in overlays:
+                if ov.get("type") in ["image", "video"] and "content" in ov:
+                    # The file was saved with this pattern:
+                    # UPLOAD_DIR / f"{job_id}_asset_{asset_filename}"
+                    input_filename = ov["content"]
+                    
+                    # Handle the edge case where the file might have been renamed during save?
+                    # Since we use the logic: asset_filename = asset.filename ...
+                    # And asset.filename comes from formData with name=ov.content
+                    # We can safely reconstruct the saved filename:
+                    saved_filename = f"{job_id}_asset_{input_filename}"
+                    ov["content"] = saved_filename
+
         except json.JSONDecodeError as e:
             return JSONResponse(
                 status_code=400, 

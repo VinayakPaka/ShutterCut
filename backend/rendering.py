@@ -65,6 +65,13 @@ def build_filter_complex(inputs, overlays):
             filename = ov.get("content")
             input_idx = file_map.get(filename)
             
+            # Fallback: try case-insensitive lookup
+            if input_idx is None:
+                for k, v in file_map.items():
+                    if k.lower() == filename.lower():
+                        input_idx = v
+                        break
+            
             if input_idx is None:
                 print(f"Warning: Asset {filename} not found in inputs.")
                 continue
@@ -98,30 +105,47 @@ def build_filter_complex(inputs, overlays):
             filename = ov.get("content")
             input_idx = file_map.get(filename)
             
+            # Fallback: try case-insensitive lookup
+            if input_idx is None:
+                for k, v in file_map.items():
+                    if k.lower() == filename.lower():
+                        input_idx = v
+                        break
+            
             if input_idx is None:
                 print(f"Warning: Asset {filename} not found in inputs.")
                 continue
+
+            # --- FIX: Synchronize Video Overlay ---
+            # 1. Force format to include alpha channel (yuva420p) to ensure overlay works cleanly
+            # 2. Shift the PTS so the video starts playing at 'start' time
+            formatted_label = f"[fmt{i}]"
+            # Use 'format=yuva420p|yuv420p' to automatically select best supported format with preference for alpha
+            format_cmd = f"[{input_idx}:v]format=yuva420p|yuv420p[fmt{i}]"
+            filter_chains.append(format_cmd)
+            
+            shifted_label = f"[shifted{i}]"
+            pts_cmd = f"{formatted_label}setpts=PTS-STARTPTS+{start}/TB[shifted{i}]"
+            filter_chains.append(pts_cmd)
+            current_overlay = shifted_label
             
             # Check if custom width/height specified
             width = ov.get("width")
             height = ov.get("height")
             
             if width and height:
-                # Scale the video first, then overlay
+                # Scale the video first (after shifting time)
                 scaled_label = f"[scaled{i}]"
-                scale_cmd = f"[{input_idx}:v]scale={width}:{height}{scaled_label}"
+                scale_cmd = f"{current_overlay}scale={width}:{height}{scaled_label}"
                 filter_chains.append(scale_cmd)
+                current_overlay = scaled_label
                 
-                filter_cmd = (
-                    f"{current_stream}{scaled_label}overlay="
-                    f"x={x}:y={y}:{enable_expr}{output_label}"
-                )
-            else:
-                # No scaling, overlay directly
-                filter_cmd = (
-                    f"{current_stream}[{input_idx}:v]overlay="
-                    f"x={x}:y={y}:{enable_expr}{output_label}"
-                )
+            # Overlay using the processed stream
+            # use shortest=0 (default) so main video length dictates, but we handle that with -t option
+            filter_cmd = (
+                f"{current_stream}{current_overlay}overlay="
+                f"x={x}:y={y}:{enable_expr}{output_label}"
+            )
             
             filter_chains.append(filter_cmd)
             current_stream = output_label
@@ -145,8 +169,18 @@ def render_video(job_id, main_video, overlay_assets, overlays, output_path, prog
     # Prepare inputs
     inputs = [main_video] + overlay_assets
     input_args = []
-    for inp in inputs:
-        input_args.extend(["-i", str(inp)])
+    
+    # Add main video
+    input_args.extend(["-i", str(main_video)])
+    
+    # Add overlay assets, looping images
+    for asset in overlay_assets:
+        asset_str = str(asset)
+        if asset_str.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')):
+            # Loop images so they don't disappear after 1 frame
+            input_args.extend(["-loop", "1", "-i", asset_str])
+        else:
+            input_args.extend(["-i", asset_str])
         
     # Build filter complex
     filter_str, final_map = build_filter_complex(inputs, overlays)
@@ -159,6 +193,9 @@ def render_video(job_id, main_video, overlay_assets, overlays, output_path, prog
     if filter_str:
         # With overlays - need to re-encode
         cmd.extend(["-filter_complex", filter_str, "-map", final_map, "-map", "0:a?"])
+        # Add -t duration to force stop at video end, preventing infinite loop from image overlays
+        if duration:
+            cmd.extend(["-t", str(duration)])
         cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-movflags", "+faststart"])
     else:
         # No overlays, just copy
@@ -207,7 +244,7 @@ def render_video(job_id, main_video, overlay_assets, overlays, output_path, prog
         process.wait()
         output = ''.join(output_lines)
         
-        print(f"FFmpeg output (last 1000 chars): {output[-1000:]}")
+        # print(f"FFmpeg output (last 1000 chars): {output[-1000:]}")
         
         if process.returncode != 0:
             error_msg = f"FFmpeg failed (code {process.returncode}): {output[-1000:]}"

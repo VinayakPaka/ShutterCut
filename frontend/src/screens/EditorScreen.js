@@ -45,6 +45,9 @@ export default function EditorScreen() {
     const [downloadUrl, setDownloadUrl] = useState(null);
     const [progress, setProgress] = useState(0);
 
+    const [videoMeta, setVideoMeta] = useState({ width: 0, height: 0, duration: 0 });
+    const [playbackStatus, setPlaybackStatus] = useState({});
+
     const videoRef = useRef(null);
 
     const resetEditor = () => {
@@ -56,6 +59,7 @@ export default function EditorScreen() {
         setJobId(null);
         setDownloadUrl(null);
         setProgress(0);
+        setVideoMeta({ width: 0, height: 0, duration: 0 });
     };
 
     const confirmNewProject = () => {
@@ -81,10 +85,25 @@ export default function EditorScreen() {
         });
 
         if (!result.canceled) {
-            setVideoUri(result.assets[0].uri);
+            const asset = result.assets[0];
+            setVideoUri(asset.uri);
             setOverlays([]);
             setJobId(null);
             setDownloadUrl(null);
+
+            // Immediately set known metadata from asset if available
+            // This prevents the "metadata not loaded" error if onLoad doesn't fire quickly enough
+            // or if the onLoad event is missed.
+            if (asset.width && asset.height) {
+                console.log("Video Asset Metadata:", { width: asset.width, height: asset.height, duration: asset.duration });
+                setVideoMeta({
+                    width: asset.width,
+                    height: asset.height,
+                    // duration from picker is usually in milliseconds, but check platform specifics
+                    // we'll default to 0 and let onLoad refine it if needed, or use a safe default
+                    duration: asset.duration ? asset.duration / 1000 : 0
+                });
+            }
         }
     };
 
@@ -94,8 +113,8 @@ export default function EditorScreen() {
             id: Date.now().toString(),
             type: 'text',
             content: 'Hello World',
-            x: 50,
-            y: 50,
+            x: width / 2 - 50, // Center roughly
+            y: (height * 0.45) / 2 - 20,
             start: 0,
             end: 5,
             color: '#FFFFFF',
@@ -115,15 +134,21 @@ export default function EditorScreen() {
 
         if (!result.canceled) {
             const asset = result.assets[0];
+            const overlayId = Date.now().toString();
+            // Generate unique filename to ensure backend mapping works correctly
+            const uniqueFileName = `image_${overlayId}.png`;
+
             const newOverlay = {
-                id: Date.now().toString(),
+                id: overlayId,
                 type: 'image',
-                content: asset.fileName || 'image.png', // Backend needs filename to map
+                content: uniqueFileName,
                 uri: asset.uri, // For local preview
-                x: 50,
-                y: 50,
+                x: width / 2 - 50,
+                y: (height * 0.45) / 2 - 50,
                 start: 0,
                 end: 5,
+                width: 100,
+                height: 100
             };
             setOverlays([...overlays, newOverlay]);
             setSelectedOverlayId(newOverlay.id);
@@ -140,15 +165,21 @@ export default function EditorScreen() {
 
         if (!result.canceled) {
             const asset = result.assets[0];
+            const overlayId = Date.now().toString();
+            // Generate unique filename
+            const uniqueFileName = `video_${overlayId}.mp4`;
+
             const newOverlay = {
-                id: Date.now().toString(),
+                id: overlayId,
                 type: 'video',
-                content: asset.fileName || 'video.mp4', // Backend needs filename to map
+                content: uniqueFileName,
                 uri: asset.uri, // For local preview
-                x: 50,
-                y: 50,
+                x: width / 2 - 75,
+                y: (height * 0.45) / 2 - 75,
                 start: 0,
                 end: 5,
+                width: 150,
+                height: 150
             };
             setOverlays([...overlays, newOverlay]);
             setSelectedOverlayId(newOverlay.id);
@@ -163,6 +194,11 @@ export default function EditorScreen() {
 
     const handleSubmit = async () => {
         if (!videoUri) return;
+        if (!videoMeta.width || !videoMeta.height) {
+            Alert.alert("Error", "Video metadata not loaded yet. Please wait a moment.");
+            return;
+        }
+
         setUploading(true);
         setProgress(0);
 
@@ -203,59 +239,104 @@ export default function EditorScreen() {
                 }
             }
 
+            // --- Coordinate Transformation Logic ---
+            // We need to map screen coordinates to video resolution coordinates
+            const containerW = width;
+            const containerH = height * 0.45; // Match styles.previewContainer
+
+            // Calculate how the video is displayed inside the container (ResizeMode.CONTAIN)
+            const videoRatio = videoMeta.width / videoMeta.height;
+            const containerRatio = containerW / containerH;
+
+            let displayedW, displayedH, offsetX, offsetY;
+
+            if (videoRatio > containerRatio) {
+                // Letterboxed (Horizontal black bars? No, Wait. 
+                // If video is wider than container, it will touch sides and have top/bottom bars if container is taller.
+                // If container is taller (containerRatio < videoRatio is FALSE)... wait.
+                // Example: Container 100x100 (Ratio 1). Video 200x100 (Ratio 2).
+                // Video fits width 100. Height becomes 50. Top/Bottom bars.
+                // 2 > 1. Correct.
+                displayedW = containerW;
+                displayedH = containerW / videoRatio;
+                offsetX = 0;
+                offsetY = (containerH - displayedH) / 2;
+            } else {
+                // Pillarboxed (Vertical black bars)
+                // Example: Container 100x100 (Ratio 1). Video 50x100 (Ratio 0.5).
+                // Video fits height 100. Width becomes 50. Side bars.
+                displayedH = containerH;
+                displayedW = containerH * videoRatio;
+                offsetY = 0;
+                offsetX = (containerW - displayedW) / 2;
+            }
+
+            console.log("Coordinate Mapping:", {
+                screen: { w: containerW, h: containerH },
+                video: { w: videoMeta.width, h: videoMeta.height },
+                displayed: { w: displayedW, h: displayedH, ox: offsetX, oy: offsetY }
+            });
+
             // Metadata
-            // Clean metadata for backend (remove uri, select props)
-            const metadata = overlays.map(({ id, type, content, x, y, start, end, color, fontSize, width, height }) => ({
-                id, type, content, x, y, start, end, color, fontSize, width, height
-            }));
+            const metadata = overlays.map(ov => {
+                // Calculate relative position (0.0 - 1.0) within the video content
+                const relativeX = (ov.x - offsetX) / displayedW;
+                const relativeY = (ov.y - offsetY) / displayedH;
+
+                // For width/height/fontSize, we also scale relative to the displayed video size
+                // Width/Height:
+                let finalWidth = ov.width ? (ov.width / displayedW) * videoMeta.width : null;
+                let finalHeight = ov.height ? (ov.height / displayedH) * videoMeta.height : null;
+
+                // Ensure min size to avoid 0
+                if (finalWidth) finalWidth = Math.max(1, Math.round(finalWidth));
+                if (finalHeight) finalHeight = Math.max(1, Math.round(finalHeight));
+
+                // Font Size: This is tricky. Approx by ratio of heights
+                const scaleFactor = videoMeta.height / displayedH;
+                const finalFontSize = ov.fontSize ? Math.round(ov.fontSize * scaleFactor) : null;
+
+                // Position
+                const finalX = Math.round(relativeX * videoMeta.width);
+                const finalY = Math.round(relativeY * videoMeta.height);
+
+                return {
+                    id: ov.id,
+                    type: ov.type,
+                    content: ov.content,
+                    x: finalX,
+                    y: finalY,
+                    start: ov.start,
+                    end: ov.end,
+                    color: ov.color,
+                    fontSize: finalFontSize,
+                    width: finalWidth,
+                    height: finalHeight
+                };
+            });
+
+            console.log("Transformed Metadata:", metadata);
             formData.append('metadata', JSON.stringify(metadata));
 
             console.log('Sending upload request to:', `${API_URL}/upload`);
 
-            // Use XMLHttpRequest for better progress tracking on web
-            const response = await new Promise((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-
-                xhr.upload.addEventListener('progress', (event) => {
-                    if (event.lengthComputable) {
-                        const uploadPercent = Math.round((event.loaded * 100) / event.total);
-                        console.log('Upload progress:', uploadPercent + '%');
-                        setProgress(uploadPercent);
-                    } else {
-                        // If total is not available, show indeterminate progress
-                        setProgress(prev => Math.min(prev + 1, 95));
+            // Use Axios for upload
+            const response = await axios.post(`${API_URL}/upload`, formData, {
+                headers: {
+                    'Content-Type': 'multipart/form-data',
+                },
+                onUploadProgress: (progressEvent) => {
+                    if (progressEvent.total) {
+                        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                        console.log('Upload progress:', percentCompleted + '%');
+                        setProgress(percentCompleted);
                     }
-                });
-
-                xhr.addEventListener('load', () => {
-                    console.log('Upload complete, status:', xhr.status);
-                    if (xhr.status >= 200 && xhr.status < 300) {
-                        try {
-                            resolve(JSON.parse(xhr.responseText));
-                        } catch (e) {
-                            reject(new Error('Invalid JSON response'));
-                        }
-                    } else {
-                        reject(new Error(`Upload failed with status ${xhr.status}: ${xhr.responseText}`));
-                    }
-                });
-
-                xhr.addEventListener('error', () => {
-                    console.error('XHR error');
-                    reject(new Error('Network error during upload'));
-                });
-
-                xhr.addEventListener('timeout', () => {
-                    reject(new Error('Upload timed out'));
-                });
-
-                xhr.open('POST', `${API_URL}/upload`);
-                xhr.timeout = 600000; // 10 minute timeout
-                xhr.send(formData);
+                },
+                timeout: 600000, // 10 minute timeout
             });
 
-            console.log('Upload response:', response);
-            const { job_id } = response;
+            console.log('Upload response:', response.data);
+            const { job_id } = response.data;
             setJobId(job_id);
             setUploading(false);
             setProcessing(true);
@@ -263,7 +344,7 @@ export default function EditorScreen() {
             pollStatus(job_id);
 
         } catch (e) {
-            console.error('Upload error:', e);
+            console.error('Upload error details:', e.toJSON ? e.toJSON() : e);
             const errorMsg = e.response?.data?.detail || e.message || "Could not upload video. Please check your connection.";
             Alert.alert("Upload Failed", errorMsg);
             setUploading(false);
@@ -343,6 +424,17 @@ export default function EditorScreen() {
                                 useNativeControls
                                 resizeMode={ResizeMode.CONTAIN}
                                 isLooping
+                                onPlaybackStatusUpdate={status => setPlaybackStatus(() => status)}
+                                onLoad={(status) => {
+                                    if (status.naturalSize) {
+                                        console.log("Video Loaded:", status.naturalSize);
+                                        setVideoMeta({
+                                            width: status.naturalSize.width,
+                                            height: status.naturalSize.height,
+                                            duration: status.durationMillis / 1000
+                                        });
+                                    }
+                                }}
                             />
                             {/* Overlays Layer */}
                             <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
@@ -353,6 +445,8 @@ export default function EditorScreen() {
                                         isSelected={selectedOverlayId === ov.id}
                                         onUpdate={(id, pos) => updateOverlay(id, pos)}
                                         onSelect={() => setSelectedOverlayId(ov.id)}
+                                        isPlaying={playbackStatus.isPlaying}
+                                        currentTime={playbackStatus.positionMillis !== undefined ? playbackStatus.positionMillis / 1000 : undefined}
                                     />
                                 ))}
                             </View>
